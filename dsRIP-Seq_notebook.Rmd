@@ -1,0 +1,619 @@
+---
+title: "dsRIP-Seq analysis in mouse fetal liver"
+output: html_notebook
+---
+
+<style>
+body {
+text-align: justify}
+</style>
+
+```{r setup_initial, message=F, warning=F, echo=F}
+
+### Load necessary packages
+
+library(tidyverse)
+library(ggrepel)
+library(ggbeeswarm)
+library(edgeR)
+
+load("./dsRIP_example.RData")
+
+
+input_ctrl_col <- "#5fa2ce"
+input_trt_col <- "#1170aa"
+
+dsRIP_ctrl_col <- "#fc7d0b"
+dsRIP_trt_col <- "#c85200"
+
+diff_colour_vec<-c(input_ctrl_col,input_trt_col,dsRIP_ctrl_col,dsRIP_trt_col)
+
+map_col_vec<-c(dsRIP_trt_col,input_trt_col)
+
+```
+
+```{r edgeR_DE_function, message=F, warning=F, echo=F}
+
+# Function to use edgeR function glmQLF generalized linear models (quasi likelihood function) ----
+
+edgeRglmQLF<-function(mat=edge_f, # object of class DGEGLM
+                      contro, # comparison, create with makeContrasts
+                      cpm_mat=edge_n, #used to calculate average signal
+                      label="", # include in label column
+                      sig_thr=0.5, # signal threshold
+                      sig_col="CPM", # signal column
+                      fc_thr=0.5, # fold change threshold
+                      pval_thr=0.05, # p-value threshold
+                      pval_col="p_val", # p-value column
+                      names=FALSE){ # include label in column names
+  degs<-glmQLFTest(edge_f,contrast=contro)$table[,-3]
+  # degs<-glmTreat(edge_f,contrast=contro,lfc=log2(1.2))$table[,-3] # alternative with FC threshold
+  colnames(degs)<-c("log2_FC","log2_CPM","p_val")
+  a_levels<-rownames(contro)[which(contro!=0)]
+  a_samples<-which(cpm_mat$samples$group%in%a_levels)
+  cpm_sele<-cpm(cpm_mat,log=T)[,a_samples]
+  degs$log2_CPM<-apply(cpm_sele,1,function(x) mean(x))
+  #degs<-exactTest(edge_c, pair=cond, dispersion=bcv^2)$table
+  degs$p_adj<-p.adjust(degs$p_val, method ="BH")
+  degs$CPM<-round(2^degs$log2_CPM,2)
+  degs$class<-"="
+  degs[which(degs[,sig_col]>=sig_thr & degs$log2_FC>=fc_thr & degs[,pval_col]<=pval_thr),"class"]<-"+"
+  degs[which(degs[,sig_col]>=sig_thr & degs$log2_FC<=(-fc_thr) & degs[,pval_col]<=pval_thr),"class"]<-"-"
+  degs$class<-as.factor(degs$class)
+  degs$comp<-label
+  degs$id<-rownames(degs)
+  degs<-degs[,c("id","comp","log2_FC","CPM","p_val","p_adj","class")]
+  if(names=="TRUE"){
+    newnames<-paste(label,colnames(degs),sep="_")
+    colnames(degs)<-newnames
+  }
+  return(degs)
+}
+
+
+```
+
+```{r edgeR_analysis, message=FALSE, warning=FALSE, echo=FALSE}
+
+### Analysis with edgeR and identification of normalization factors
+
+edge_c <- DGEList(counts=counts_df,group=c_anno$condition,samples=c_anno,genes=r_anno) 
+edge_n <- calcNormFactors(edge_c,method="TMM") 
+norm_factors<-(edge_n$samples$lib.size*edge_n$samples$norm.factors)/mean(edge_n$samples$lib.size*edge_n$samples$norm.factors) 
+names(norm_factors)<-edge_n$samples$sample
+
+#norm_factors
+
+norm_df<-data.frame("sample"=names(norm_factors),
+                    "div_norm"=norm_factors)
+
+```
+
+```{r fpkm_tables, message=FALSE, warning=FALSE, echo=FALSE}
+
+### Create FPKM tables
+
+fpkm_table<-as.data.frame(rpkm(edge_n,gene.length=edge_n$genes$transcript_length,log=F))
+
+l_fpkm_table<- fpkm_table %>% mutate(id=rownames(fpkm_table)) %>% pivot_longer(-id, names_to = "sample", values_to = "fpkm")
+l_fpkm_table<- left_join(l_fpkm_table,c_anno)
+
+fpkm_df<-l_fpkm_table %>% dplyr::group_by(condition,id) %>% 
+            dplyr::summarise(N=n(),avg=mean(fpkm),sd=sd(fpkm)) %>% ungroup() %>% mutate("se"=sd/sqrt(N)) 
+
+fpkm_avg <- fpkm_df %>% dplyr::select(id,condition,avg) %>% pivot_wider(names_from = condition, values_from = avg)
+colnames(fpkm_avg)[-1]<-paste0(colnames(fpkm_avg)[-1],"_fpkm_avg")
+
+fpkm_se <- fpkm_df %>% dplyr::select(id,condition,se) %>% pivot_wider(names_from = condition, values_from = se)
+colnames(fpkm_se)[-1]<-paste0(colnames(fpkm_se)[-1],"_fpkm_se")
+
+fpkm_avgse<-left_join(fpkm_avg,fpkm_se)
+rownames(fpkm_avgse) <- fpkm_avgse$id
+
+```
+
+### Clustering of samples based on FPKM values
+
+```{r mds_counts, fig.height=3.5, fig.width=3.5, warning=F, message=F, echo=F}
+
+sample_data<-scale(t(fpkm_table)) 
+sample_distances <- dist(sample_data, method = "euclidean") 
+
+mds_cmdscale <- as.data.frame(cmdscale(as.matrix(sample_distances)))
+colnames(mds_cmdscale) <- c("MDS_1","MDS_2")
+mds_cmdscale$sample <- rownames(mds_cmdscale)
+
+mds_cmdscale <- left_join(mds_cmdscale,c_anno)
+
+cmd<-ggplot(mds_cmdscale, aes(MDS_1, MDS_2, colour=condition)) + 
+  geom_point(size=2.5,alpha=.9) +
+  geom_text_repel(aes(label=sample), fontface = "bold",show.legend = F) + 
+  scale_colour_manual(name="Condition",values=diff_colour_vec) +
+  theme_bw() + 
+  theme(legend.position = "none", panel.grid.minor=element_blank())
+
+cmd
+#ggsave("./counts_cmdscale.pdf", cmd, device=cairo_pdf,width = 3.5, height = 3.5, units = c("in"))
+
+```
+
+### Identification of genes enriched  in dsRIP of trt condition 
+
+Based on 3 selection criteria: 
+
+* Selection 1: dsRIP over INPUT enrichment (p-value < 0.05)
+* Selection 2: dsRIP trt vs  ctrl enrichment (normalized for INPUT variations) (pvalue<0.05)
+* Selection 3: dsRIP variation > INPUT variation (in absolute value)
+
+```{r DEGs_analysis_pair, message=F, warning=F, echo=F}
+
+### Design creation 
+
+design <- model.matrix(~0+group, data=edge_c$samples) 
+colnames(design)<-levels(edge_c$samples$group) 
+rownames(design)<-edge_c$samples$sample
+
+edge_d <- estimateDisp(edge_n,design,robust=T) 
+
+edge_f <- glmQLFit(edge_d,design,robust=T) 
+
+### Contrasts
+
+contro_label <- "(dsRIP_trt-dsRIP_ctrl)"
+contro <- makeContrasts(contro_label,levels=design) 
+dsRIP_DEGs<-edgeRglmQLF(mat=edge_f, cpm_mat=edge_n, contro=contro, label="dsRIP", sig_thr=0.5, sig_col="CPM", fc_thr=0, pval_thr=0.05, pval_col="p_val",names=T)
+
+contro_label <- "(INPUT_trt-INPUT_ctrl)"
+contro <- makeContrasts(contro_label,levels=design) 
+INPUT_DEGs<-edgeRglmQLF(mat=edge_f, cpm_mat=edge_n, contro=contro, label="INPUT", sig_thr=0.5, sig_col="CPM", fc_thr=0, pval_thr=0.05, pval_col="p_val",names=T)
+
+### Selection 1
+
+contro_label <- "(dsRIP_trt + dsRIP_ctrl) - (INPUT_trt + INPUT_ctrl)"
+contro <- makeContrasts(contro_label,levels=design) 
+sele1_DEGs<-edgeRglmQLF(mat=edge_f, cpm_mat=edge_n, contro=contro, label="sele_1", sig_thr=0.5, sig_col="CPM", fc_thr=0, pval_thr=0.05, pval_col="p_val",names=T)
+
+### Selection 2
+
+contro_label <- "(dsRIP_trt - dsRIP_ctrl) - (INPUT_trt - INPUT_ctrl)"
+contro <- makeContrasts(contro_label,levels=design) 
+sele2_DEGs<-edgeRglmQLF(mat=edge_f, cpm_mat=edge_n, contro=contro, label="sele_2", sig_thr=0.5, sig_col="CPM", fc_thr=0, pval_thr=0.05, pval_col="p_val",names=T)
+
+
+dsRIP_1f_df<- bind_cols(sele1_DEGs[,c(1,3,4,5,7)], sele2_DEGs[,c(3,5,7)], dsRIP_DEGs[,c(3,5,7)], INPUT_DEGs[,c(3,5,7)])
+
+fuse_df<-full_join(r_anno , dsRIP_1f_df, by=c("external_gene_name" ="sele_1_id"))
+
+fuse_df$sele_3_class <- ifelse(abs(fuse_df$dsRIP_log2_FC)>abs(fuse_df$INPUT_log2_FC),"+","=")
+
+fuse_df$dsRIP_final_class<-"=" # Final identification of J2 candidates
+
+fuse_df[which(fuse_df$sele_1_class=="+" &
+              fuse_df$sele_2_class=="+" &
+              fuse_df$sele_3_class=="+"
+              ),"dsRIP_final_class"]<-"+"
+
+
+fuse_df$dsRIP_final_class <- factor(fuse_df$dsRIP_final_class,levels=c("=","+"))
+
+fuse_df_cands <- fuse_df %>% 
+  dplyr::filter(dsRIP_final_class=="+") %>% 
+  dplyr::select(external_gene_name, gene_biotype, description, chromosome_ucsc, start_position, end_position, strand_ucsc, ensembl_transcript_id, external_transcript_name, transcript_biotype, dsRIP_log2_FC, INPUT_log2_FC) %>% dplyr::arrange(dsRIP_log2_FC)
+
+```
+
+```{r scatter, fig.height=4, fig.width=4, warning=F, message=F, echo=F}
+
+in_mat<- fuse_df
+in_mat$J2_final_class <- as.factor(in_mat$dsRIP_final_class)
+
+sc<-ggplot(in_mat, aes(x=sele_2_log2_FC,y=sele_1_log2_FC,colour=dsRIP_final_class,alpha=dsRIP_final_class,size=dsRIP_final_class))+
+  geom_point(shape=16)+
+  geom_hline(yintercept=0,col="grey40",lty=2,lwd=0.6) +
+  geom_vline(xintercept=0,col="grey40",lty=2,lwd=0.6) +
+  theme_bw() +
+  scale_colour_manual(values=c(dsRIP_ctrl_col,dsRIP_trt_col)) +
+  scale_size_manual(values=c(0.5,1.5)) +
+  scale_alpha_manual(values=c(0.1,0.8))+
+  theme(legend.justification=c(0,1), legend.position=c(0,1))+
+  theme(legend.title=element_blank())+
+  theme(legend.position = "none")+
+  theme(panel.grid.minor = element_blank())+
+  labs(x = "dsRIP trt vs ctrl Fold Enrichment \n(log2, normalized for INPUT)", y = "dsRIP/INPUT Fold Enrichment \n(log2)")+
+  coord_cartesian(xlim = c(-1,3), ylim = c(-3,10))
+
+sc<-sc +
+      geom_text_repel(data = subset(in_mat,
+                                    dsRIP_final_class=="+" & 
+                                    (sele_2_log2_FC^2 + (sele_1_log2_FC/4)^2)>3  # labeling outside a circle
+                                    ),
+                      aes(x=sele_2_log2_FC,y=sele_1_log2_FC,label=external_gene_name),
+                      xlim  = c(1,NA),
+                      ylim  = c(2,NA),
+                      colour=input_trt_col,
+                      alpha=1,
+                      fontface=4,
+                      size=3,
+                      box.padding = unit(0.1, "lines"),
+                      point.padding = unit(0.2, "lines"),
+                      segment.color = input_trt_col,
+                      segment.size=0.1,
+                      segment.alpha=0.5) 
+
+sc
+
+#ggsave("J2_RNAseq_scatter.pdf",sc,device=cairo_pdf,width = 3, height = 3, units = c("in"))
+
+```
+
+### Plot showing genes of interest (Selection 1)
+
+```{r sele_1, fig.height=3, fig.width=5, warning=F, message=F, echo=F}
+
+ref_point_df <- left_join(l_fpkm_table, r_anno %>% dplyr::select(id=external_gene_name,gene_biotype))
+
+ref_df<-ref_point_df %>% dplyr::group_by(id,gene_biotype,condition,type,treatment) %>% 
+            dplyr::summarise(N=n(),avg=mean(fpkm),sd=sd(fpkm)) %>% ungroup() %>% mutate("se"=sd/sqrt(N))
+
+#--- 
+
+sele_vec<-c("Gapdh","Ptbp3")
+
+#---
+
+ref_filter<- ref_df %>% dplyr::filter(id %in% sele_vec)
+ref_filter$id<-factor(ref_filter$id,levels=sele_vec)
+ref_filter$condition<-factor(ref_filter$condition,levels=c("INPUT_ctrl","INPUT_trt","dsRIP_ctrl","dsRIP_trt"))
+ref_filter <- ref_filter %>% arrange(id,condition)
+
+ref_point_filter <-  ref_point_df %>% dplyr::filter(id %in% sele_vec)
+ref_point_filter$id<-factor(ref_point_filter$id,levels=sele_vec)
+ref_point_filter$condition<-factor(ref_point_filter$condition,levels=c("INPUT_ctrl","INPUT_trt","dsRIP_ctrl","dsRIP_trt"))
+ref_point_filter <- ref_point_filter %>% arrange(id,condition)
+
+bpt<-ggplot(ref_filter,aes(condition,avg,fill=condition,colour=condition))+
+  geom_crossbar(aes(ymin=avg,ymax=avg),position = "dodge",width=.8,alpha=.9,fatten=1.5)+
+  geom_errorbar(aes(ymin=(avg-se), ymax=(avg+se)), width=.4,position=position_dodge(),show.legend=F,alpha=.8)+
+  
+  geom_quasirandom(data=ref_point_filter, aes(condition,fpkm), alpha=.7,width=.1,shape=16)+
+  scale_fill_manual(name="Condition",values=diff_colour_vec) +
+  scale_colour_manual(name="Condition",values=diff_colour_vec)+ 
+  scale_y_continuous(limits=c(NA,NA),expand = expand_scale(mult = c(.1, .25)))+
+
+  theme_bw() +
+  theme(axis.title.x=element_blank()) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1, colour="grey15"))+
+  theme(panel.grid.major.x=element_blank(),
+        panel.grid.minor.y=element_blank())+
+  theme(legend.text = element_text(size = 7),
+        legend.key.size = unit((0.15),"in"),
+        legend.position="none",
+        legend.title=element_blank(),
+        legend.background = element_rect(fill = NA))+
+  
+  theme(strip.text=element_text(colour="white",face="bold"))+
+  theme(panel.border=element_rect(colour=c("grey40"),size=0.3))+
+  theme(strip.background=element_rect(fill="grey40",colour="grey40",size=0.3))+
+  facet_wrap(~id, ncol=5, scales = "free")+
+  labs(y="Abundance (FPKM)")
+  
+bpt
+
+#ggsave("Sele_1.pdf",bpt,device=cairo_pdf,width = 3.2, height = 1.8, units = c("in"))
+
+```
+
+### Plot showing genes of interest (Selection 2)
+
+```{r sele_2, fig.height=3, fig.width=5, warning=F, message=F, echo=F}
+
+
+ref_point_df <- left_join(l_fpkm_table, r_anno %>% dplyr::select(id=external_gene_name,gene_biotype))
+
+ref_df<-ref_point_df %>% dplyr::group_by(id,gene_biotype,condition,type,treatment) %>% 
+            dplyr::summarise(N=n(),avg=mean(fpkm),sd=sd(fpkm)) %>% ungroup() %>% mutate("se"=sd/sqrt(N))
+
+#--- 
+
+
+sele_vec<-c("Mllt3","Mbnl1")
+
+#---
+
+ref_filter<- ref_df %>% dplyr::filter(id %in% sele_vec)
+ref_filter$id<-factor(ref_filter$id,levels=sele_vec)
+ref_filter$condition<-factor(ref_filter$condition,levels=c("INPUT_ctrl","INPUT_trt","dsRIP_ctrl","dsRIP_trt"))
+ref_filter <- ref_filter %>% arrange(id,condition)
+
+ref_point_filter <-  ref_point_df %>% dplyr::filter(id %in% sele_vec)
+ref_point_filter$id<-factor(ref_point_filter$id,levels=sele_vec)
+ref_point_filter$condition<-factor(ref_point_filter$condition,levels=c("INPUT_ctrl","INPUT_trt","dsRIP_ctrl","dsRIP_trt"))
+ref_point_filter <- ref_point_filter %>% arrange(id,condition)
+
+bpt<-ggplot(ref_filter,aes(condition,avg,fill=condition,colour=condition))+
+  geom_crossbar(aes(ymin=avg,ymax=avg),position = "dodge",width=.8,alpha=.9,fatten=1.5)+
+  geom_errorbar(aes(ymin=(avg-se), ymax=(avg+se)), width=.4,position=position_dodge(),show.legend=F,alpha=.8)+
+  
+  geom_quasirandom(data=ref_point_filter, aes(condition,fpkm), alpha=.7,width=.1,shape=16)+
+  scale_fill_manual(name="Condition",values=diff_colour_vec) +
+  scale_colour_manual(name="Condition",values=diff_colour_vec)+ 
+  scale_y_continuous(limits=c(NA,NA),expand = expand_scale(mult = c(.1, .25)))+
+
+  theme_bw() +
+  theme(axis.title.x=element_blank()) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1, colour="grey15"))+
+  theme(panel.grid.major.x=element_blank(),
+        panel.grid.minor.y=element_blank())+
+  theme(legend.text = element_text(size = 7),
+        legend.key.size = unit((0.15),"in"),
+        legend.position="none",
+        legend.title=element_blank(),
+        legend.background = element_rect(fill = NA))+
+  
+  theme(strip.text=element_text(colour="white",face="bold"))+
+  theme(panel.border=element_rect(colour=c("grey40"),size=0.3))+
+  theme(strip.background=element_rect(fill="grey40",colour="grey40",size=0.3))+
+  facet_wrap(~id, ncol=5, scales = "free")+
+  labs(y="Abundance (FPKM)")
+  
+bpt
+
+#ggsave("Sele_2.pdf",bpt,device=cairo_pdf,width = 3.2, height = 1.8, units = c("in"))
+
+```
+
+### Plot showing genes of interest (Selection 3)
+
+```{r sele_3, fig.height=3, fig.width=5, warning=F, message=F, echo=F}
+
+
+ref_point_df <- left_join(l_fpkm_table, r_anno %>% dplyr::select(id=external_gene_name,gene_biotype))
+
+ref_df<-ref_point_df %>% dplyr::group_by(id,gene_biotype,condition,type,treatment) %>% 
+            dplyr::summarise(N=n(),avg=mean(fpkm),sd=sd(fpkm)) %>% ungroup() %>% mutate("se"=sd/sqrt(N))
+
+#--- 
+
+
+sele_vec<-c("Caprin2","Rfx7")
+
+#---
+
+ref_filter<- ref_df %>% dplyr::filter(id %in% sele_vec)
+ref_filter$id<-factor(ref_filter$id,levels=sele_vec)
+ref_filter$condition<-factor(ref_filter$condition,levels=c("INPUT_ctrl","INPUT_trt","dsRIP_ctrl","dsRIP_trt"))
+ref_filter <- ref_filter %>% arrange(id,condition)
+
+ref_point_filter <-  ref_point_df %>% dplyr::filter(id %in% sele_vec)
+ref_point_filter$id<-factor(ref_point_filter$id,levels=sele_vec)
+ref_point_filter$condition<-factor(ref_point_filter$condition,levels=c("INPUT_ctrl","INPUT_trt","dsRIP_ctrl","dsRIP_trt"))
+ref_point_filter <- ref_point_filter %>% arrange(id,condition)
+
+bpt<-ggplot(ref_filter,aes(condition,avg,fill=condition,colour=condition))+
+  geom_crossbar(aes(ymin=avg,ymax=avg),position = "dodge",width=.8,alpha=.9,fatten=1.5)+
+  geom_errorbar(aes(ymin=(avg-se), ymax=(avg+se)), width=.4,position=position_dodge(),show.legend=F,alpha=.8)+
+  
+  geom_quasirandom(data=ref_point_filter, aes(condition,fpkm), alpha=.7,width=.1,shape=16)+
+  scale_fill_manual(name="Condition",values=diff_colour_vec) +
+  scale_colour_manual(name="Condition",values=diff_colour_vec)+ 
+  scale_y_continuous(limits=c(NA,NA),expand = expand_scale(mult = c(.1, .25)))+
+
+  theme_bw() +
+  theme(axis.title.x=element_blank()) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1, colour="grey15"))+
+  theme(panel.grid.major.x=element_blank(),
+        panel.grid.minor.y=element_blank())+
+  theme(legend.text = element_text(size = 7),
+        legend.key.size = unit((0.15),"in"),
+        legend.position="none",
+        legend.title=element_blank(),
+        legend.background = element_rect(fill = NA))+
+  
+  theme(strip.text=element_text(colour="white",face="bold"))+
+  theme(panel.border=element_rect(colour=c("grey40"),size=0.3))+
+  theme(strip.background=element_rect(fill="grey40",colour="grey40",size=0.3))+
+  facet_wrap(~id, ncol=5, scales = "free")+
+  labs(y="Abundance (FPKM)")
+  
+bpt
+
+#ggsave("Sele_3.pdf",bpt,device=cairo_pdf,width = 3.2, height = 1.8, units = c("in"))
+
+```
+
+
+### Plot showing genes of interest (Final overlap selection)
+
+```{r sele_final, fig.height=3, fig.width=5, warning=F, message=F, echo=F}
+
+
+ref_point_df <- left_join(l_fpkm_table, r_anno %>% dplyr::select(id=external_gene_name,gene_biotype))
+
+ref_df<-ref_point_df %>% dplyr::group_by(id,gene_biotype,condition,type,treatment) %>% 
+            dplyr::summarise(N=n(),avg=mean(fpkm),sd=sd(fpkm)) %>% ungroup() %>% mutate("se"=sd/sqrt(N))
+
+#--- 
+
+sele_vec<-c("Kras","Malat1")
+
+
+test_df<-fuse_df %>% dplyr::select(external_gene_name,dsRIP_p_val,dsRIP_class) %>% dplyr::filter(external_gene_name %in% sele_vec)
+
+test_df[which(test_df$dsRIP_class!="+"),"dsRIP_p_val"]<-1
+
+starLight<-function(i_vec){
+  o_vec<-rep("",length(i_vec))
+  o_vec[which(i_vec<=0.1)]<-""
+  o_vec[which(i_vec<=0.05)]<-"*"
+  o_vec[which(i_vec<=0.01)]<-"**"
+  o_vec[which(i_vec<=0.001)]<-"***"
+  return(o_vec)
+}
+
+test_df$Text<-starLight(test_df$dsRIP_p_val)
+test_df$condition<-"dsRIP_trt"
+test_df$id <- factor(test_df$external_gene_name,levels=sele_vec)
+
+#---
+
+ref_filter<- ref_df %>% dplyr::filter(id %in% sele_vec)
+ref_filter$id<-factor(ref_filter$id,levels=sele_vec)
+ref_filter$condition<-factor(ref_filter$condition,levels=c("INPUT_ctrl","INPUT_trt","dsRIP_ctrl","dsRIP_trt"))
+ref_filter <- ref_filter %>% arrange(id,condition)
+
+ref_point_filter <-  ref_point_df %>% dplyr::filter(id %in% sele_vec)
+ref_point_filter$id<-factor(ref_point_filter$id,levels=sele_vec)
+ref_point_filter$condition<-factor(ref_point_filter$condition,levels=c("INPUT_ctrl","INPUT_trt","dsRIP_ctrl","dsRIP_trt"))
+ref_point_filter <- ref_point_filter %>% arrange(id,condition)
+
+bpt<-ggplot(ref_filter,aes(condition,avg,fill=condition,colour=condition))+
+  geom_crossbar(aes(ymin=avg,ymax=avg),position = "dodge",width=.8,alpha=.9,fatten=1.5)+
+  geom_errorbar(aes(ymin=(avg-se), ymax=(avg+se)), width=.4,position=position_dodge(),show.legend=F,alpha=.8)+
+  
+  geom_quasirandom(data=ref_point_filter, aes(condition,fpkm), alpha=.7,width=.1,shape=16)+
+  scale_fill_manual(name="Condition",values=diff_colour_vec) +
+  scale_colour_manual(name="Condition",values=diff_colour_vec)+ 
+  scale_y_continuous(limits=c(NA,NA),expand = expand_scale(mult = c(.1, .25)))+
+
+  theme_bw() +
+  theme(axis.title.x=element_blank()) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1, colour="grey15"))+
+  theme(panel.grid.major.x=element_blank(),
+        panel.grid.minor.y=element_blank())+
+  theme(legend.text = element_text(size = 7),
+        legend.key.size = unit((0.15),"in"),
+        legend.position="none",
+        legend.title=element_blank(),
+        legend.background = element_rect(fill = NA))+
+   geom_text(data=test_df,aes(label=Text, y=Inf),fontface="italic", colour=dsRIP_trt_col, alpha=0.9,size=4,vjust=1.5,hjust=0.5)+
+  theme(strip.text=element_text(colour="white",face="bold"))+
+  theme(panel.border=element_rect(colour=c("grey40"),size=0.3))+
+  theme(strip.background=element_rect(fill="grey40",colour="grey40",size=0.3))+
+  facet_wrap(~id, ncol=5, scales = "free")+
+  labs(y="Abundance (FPKM)")
+  
+bpt
+
+#ggsave("Sele_4.pdf",bpt,device=cairo_pdf,width = 3.2, height = 1.8, units = c("in"))
+
+
+```
+
+### Analysis of minimum folding energy (MFE)
+
+
+```{r cDNA_energy_plot, message = F, warning =F,fig.height=3.5,fig.width=3, echo=F}
+
+fuse_str_df <- left_join(fuse_df,vienna_df)
+
+in_mat <- fuse_str_df %>% dplyr::filter(sele_1_class!="-")
+
+test_label<-paste0("P: ",format(wilcox.test(in_mat[which(in_mat$sele_1_class=="+"),"mfe"],
+        in_mat[which(in_mat$sele_1_class=="="),"mfe"],alternative="two.sided",paired = F)$p.value/2,digits=2))
+
+vp <- ggplot(in_mat,aes(x=sele_1_class,y=mfe,fill=sele_1_class,colour=sele_1_class)) +
+    geom_violin(alpha=0.7,outlier.shape = NA,width=0.8,scale="width", colour= NA)+
+    geom_boxplot(alpha=0.9,outlier.shape = NA, width=0.25,fill="white", notch = T)+
+    scale_fill_manual(values= c(dsRIP_ctrl_col,input_ctrl_col))+
+    scale_color_manual(values= c(dsRIP_trt_col,input_trt_col))+
+    theme_bw() +
+    theme(axis.title.x=element_blank()) +
+    theme(legend.position = "none",legend.justification =c(0.99,0.01),legend.title = element_blank())+
+    theme(panel.grid.minor = element_blank())+
+    theme(panel.grid.major.x = element_blank())+
+    theme(panel.border=element_rect(colour="gray40",size=0.3))+
+   annotate(geom="text",label=test_label, x=1.5, y=Inf,fontface="italic", colour="grey40", alpha=0.8,size=2.7,vjust=1.5,hjust=0.5)+
+  scale_x_discrete(labels=c("dsRIP\nenriched","Invariant"))+
+  coord_cartesian(ylim = c(-3500,300))+
+  labs(y="Minimum folding energy\n(kcal/mol)",title="Folding energy")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+vp
+
+ggsave("dsRIP_energy_prop.pdf",vp,device=cairo_pdf,width = 2.2, height = 2.8, units = c("in"))
+
+```
+
+
+### dsRIP-Seq coverage maps (transcript locus)
+
+
+```{r,message=F,warning=F,echo=F,fig.height=3.5,fig.width=7}
+
+min_r<-0  # Minimum Y range is set
+max_r<-1  # Maximum Y range is set
+anno_ratio <- 1/8 #  portion of the plot dedicated to annotation
+
+dsRNA_min<- 10 #minimum stretch of dsRNA to be visualized
+dsRNA_anno <- T  # annotation for ss and m6a (requires vienna_df)
+
+id_sel <- "Kras-201"
+
+# Plot settings
+
+save(cov_gene,id_anno,map_col_vec,id_str,file="Kras_map.RData")
+
+y_range<-c(round(min(range(cov_gene$cov_norm)[1],min_r)),round(max(range(cov_gene$cov_norm)[2],max_r)))
+x_range<-range(cov_gene$position)
+
+anno_yspan<-(y_range[2]-y_range[1])*anno_ratio
+
+map_gg <- ggplot(cov_gene,aes(position,cov_norm,fill=condition)) +
+    
+    geom_ribbon(aes(ymin = cov_norm - se, ymax = cov_norm),position=position_nudge(),alpha=0.4)+
+    geom_line(aes(colour=condition),stat = "identity",position=position_nudge(),alpha=0.9,size=0.5)+
+    
+    annotate(geom="rect",
+             xmin=min(id_anno$cdna_start,na.rm=T),
+             xmax=max(id_anno$cdna_end,na.rm=T),
+             ymin=y_range[1]-(0.9*anno_yspan),
+             ymax=y_range[1]-(0.6*anno_yspan),
+             colour=NA,fill="grey70")+
+  
+    annotate(geom="rect",
+             xmin=min(id_anno$cdna_coding_start,na.rm=T),
+             xmax=max(id_anno$cdna_coding_end,na.rm=T),
+             ymin=y_range[1]-(1*anno_yspan),
+             ymax=y_range[1]-(0.5*anno_yspan),
+             colour=NA,fill="grey60")+
+  
+    annotate(geom="rect",
+             xmin=id_anno$cdna_start[-1]-2,
+             xmax=id_anno$cdna_start[-1]+2,
+             ymin=y_range[1]-(1*anno_yspan),
+             ymax=y_range[1]-(0.5*anno_yspan),
+             colour=NA,fill="white")+
+  
+    scale_fill_manual(name="",values=map_col_vec) +
+    scale_colour_manual(name="",values=map_col_vec) +
+    scale_y_continuous(breaks=c(y_range[1],y_range[2]))+
+    scale_x_continuous(expand=c(0.01,0),breaks=c(x_range[1],x_range[2]))+
+  
+    theme_light()+
+    theme(panel.grid = element_blank())+
+    theme(legend.position="none")+
+    theme(legend.text = element_text(size = 6),legend.key.size = unit((0.15),"in"))+
+    theme(legend.title=element_blank())+
+    theme(panel.border = element_blank())+
+    theme(axis.title.x=element_blank()) +
+    theme(axis.text.y=element_text(vjust=c(0,1)))+
+    theme(axis.text.x=element_text(hjust=c(0,1)))+
+    theme(plot.title = element_text(lineheight=5, size=10,face="italic",colour="grey10",hjust = 0.5))+
+    labs(x="Coordinate",y="Norm signal",title=paste(unique(id_anno$external_transcript_name),
+                                                    unique(id_anno$transcript_biotype),sep=" "))
+
+struct_hits<-str_locate_all(id_str,"[\\(,\\)]+")[[1]] %>% as.data.frame() %>% dplyr::mutate(length=end-start+1) %>% dplyr::filter(length>=dsRNA_min)
+
+map_gg <- map_gg + annotate(geom="rect",
+                            xmin=struct_hits$start,
+                            xmax=struct_hits$end,
+                            ymin=y_range[1]-(0.45*anno_yspan),
+                            ymax=y_range[1]-(0.05*anno_yspan),
+                            colour=NA,fill=dsRIP_trt_col)
+
+
+map_gg
+
+ggsave(paste0("./",unique(id_anno$external_transcript_name),"dsRIP.pdf"), map_gg, device=cairo_pdf, width = 5, height = 2.5, units = c("in"))
+
+```
