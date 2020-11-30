@@ -9,10 +9,10 @@
 The dataset of worked example analyzed in __dsRIP-Seq__ was generated in the following publication:
 
 Gao Y, Vasic R, Song Y, Teng R, Liu C, Gbyli R, Biancon G, Nelakanti R, Lobben K, Kudo E, Liu W, Ardasheva A, Fu X, Wang X, Joshi P, Lee V, Dura B, Viero G, Iwasaki A, Fan R, Xiao A, Flavell RA, Li HB, Tebaldi T, Halene S. 
-***m6A Modification Prevents Formation of Endogenous Double-Stranded RNAs and Deleterious Innate Immune Responses during Hematopoietic Development.*** 
-*Immunity. 2020 Jun 16;52(6):1007-1021.e8.* 
 
-[DOI](http://dx.doi.org/10.1016/j.immuni.2020.05.003)
+***m6A Modification Prevents Formation of Endogenous Double-Stranded RNAs and Deleterious Innate Immune Responses during Hematopoietic Development.*** 
+
+[*Immunity. 2020 Jun 16;52(6):1007-1021.e8.*](http://dx.doi.org/10.1016/j.immuni.2020.05.003)
 
 ------------------------------------------------------------------------
 
