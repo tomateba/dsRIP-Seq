@@ -13,3 +13,7 @@ Gao Y, Vasic R, Song Y, Teng R, Liu C, Gbyli R, Biancon G, Nelakanti R, Lobben K
 *Immunity. 2020 Jun 16;52(6):1007-1021.e8. doi: 10.1016/j.immuni.2020.05.003.*
 
 ------------------------------------------------------------------------
+
+## License
+
+[![Packagist](https://img.shields.io/packagist/l/doctrine/orm.svg?maxAge=2592000?style=flat)](https://opensource.org/licenses/MIT)
